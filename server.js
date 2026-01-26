@@ -1,13 +1,22 @@
-require('dotenv').config();
+require('dotenv').config({ path: process.env.NODE_ENV === 'development' ? '.env.local' : '.env' });
 
 // ============= CONFIGURACIÓN - EDITAR AQUÍ =============
 const CONFIG = {
   PORT: process.env.PORT || 5000,
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:5555',
-  // Resend
+  NODE_ENV: process.env.NODE_ENV || 'production',
+  USE_GMAIL: process.env.USE_GMAIL === 'true',
+  
+  // Resend (producción)
   RESEND_API_KEY: process.env.RESEND_API_KEY,
   EMAIL_FROM: process.env.EMAIL_FROM || 'onboarding@resend.dev',
   EMAIL_FROM_NAME: process.env.EMAIL_FROM_NAME || 'Newsletter Demo',
+  
+  // Gmail (desarrollo local)
+  EMAIL_USER: process.env.EMAIL_USER,
+  EMAIL_PASSWORD: process.env.EMAIL_PASSWORD,
+  
+  // Admin
   ADMIN_EMAIL: process.env.ADMIN_EMAIL,
   ADMIN_PASSWORD: process.env.ADMIN_PASSWORD,
 };
@@ -15,7 +24,6 @@ const CONFIG = {
 
 const express = require('express');
 const cors = require('cors');
-const { Resend } = require('resend');
 const multer = require('multer');
 const fs = require('fs').promises;
 const path = require('path');
@@ -26,7 +34,9 @@ const app = express();
 const allowedOrigins = [
   CONFIG.FRONTEND_URL,
   'http://localhost:5173',
-  'http://localhost:3000'
+  'http://localhost:5555',
+  'http://localhost:3000',
+  'https://shopdemosg.netlify.app'
 ];
 
 app.use(cors({
@@ -71,41 +81,87 @@ const upload = multer({
   }
 });
 
-// ========== CONFIGURACIÓN DE RESEND ==========
-let resend = null;
+// ========== CONFIGURACIÓN DUAL: RESEND O GMAIL ==========
+let emailService = null;
+let emailProvider = 'unknown';
 
-if (CONFIG.RESEND_API_KEY) {
-  resend = new Resend(CONFIG.RESEND_API_KEY);
-  console.log('✅ Resend configurado correctamente');
+if (CONFIG.USE_GMAIL && CONFIG.EMAIL_USER && CONFIG.EMAIL_PASSWORD) {
+  // Modo desarrollo: usar Gmail/Nodemailer
+  const nodemailer = require('nodemailer');
+  
+  emailService = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: CONFIG.EMAIL_USER,
+      pass: CONFIG.EMAIL_PASSWORD.replace(/\s/g, '')
+    },
+    tls: {
+      rejectUnauthorized: false
+    }
+  });
+  
+  emailProvider = 'Gmail';
+  console.log('📧 Modo DESARROLLO: Usando Gmail/Nodemailer');
+  console.log('   Email:', CONFIG.EMAIL_USER);
+  
+  // Verificar conexión
+  emailService.verify()
+    .then(() => console.log('✅ Gmail configurado correctamente'))
+    .catch((err) => console.error('❌ Error en Gmail:', err.message));
+    
+} else if (CONFIG.RESEND_API_KEY) {
+  // Modo producción: usar Resend
+  const { Resend } = require('resend');
+  emailService = new Resend(CONFIG.RESEND_API_KEY);
+  emailProvider = 'Resend';
+  
+  console.log('🚀 Modo PRODUCCIÓN: Usando Resend');
   console.log('   From Email:', CONFIG.EMAIL_FROM);
   console.log('   From Name:', CONFIG.EMAIL_FROM_NAME);
 } else {
-  console.error('❌ RESEND_API_KEY no configurado');
-  console.error('💡 Obtén tu API Key en: https://resend.com/api-keys');
+  console.error('❌ No hay servicio de email configurado');
+  console.error('💡 Para desarrollo: configura USE_GMAIL=true, EMAIL_USER y EMAIL_PASSWORD');
+  console.error('💡 Para producción: configura RESEND_API_KEY');
 }
 
-// Helper para enviar emails con Resend
+// Helper unificado para enviar emails
 const sendEmail = async ({ to, subject, html }) => {
-  if (!resend) {
-    throw new Error('Resend no está configurado. Verifica RESEND_API_KEY.');
+  if (!emailService) {
+    throw new Error('Servicio de email no configurado');
   }
 
   try {
-    const { data, error } = await resend.emails.send({
-      from: `${CONFIG.EMAIL_FROM_NAME} <${CONFIG.EMAIL_FROM}>`,
-      to: [to],
-      subject: subject,
-      html: html,
-    });
+    if (emailProvider === 'Gmail') {
+      // Enviar con Nodemailer/Gmail
+      const info = await emailService.sendMail({
+        from: `"${CONFIG.EMAIL_FROM_NAME}" <${CONFIG.EMAIL_USER}>`,
+        to: to,
+        subject: subject,
+        html: html,
+      });
+      
+      console.log(`✅ [Gmail] Email enviado a: ${to}`);
+      console.log(`   Message ID: ${info.messageId}`);
+      return { success: true, id: info.messageId };
+      
+    } else if (emailProvider === 'Resend') {
+      // Enviar con Resend
+      const { data, error } = await emailService.emails.send({
+        from: `${CONFIG.EMAIL_FROM_NAME} <${CONFIG.EMAIL_FROM}>`,
+        to: [to],
+        subject: subject,
+        html: html,
+      });
 
-    if (error) {
-      console.error(`❌ Error de Resend:`, error);
-      throw error;
+      if (error) {
+        console.error(`❌ [Resend] Error:`, error);
+        throw error;
+      }
+
+      console.log(`✅ [Resend] Email enviado a: ${to}`);
+      console.log(`   ID: ${data.id}`);
+      return { success: true, id: data.id };
     }
-
-    console.log(`✅ Email enviado a: ${to}`);
-    console.log(`   ID: ${data.id}`);
-    return { success: true, id: data.id };
   } catch (error) {
     console.error(`❌ Error enviando email a ${to}:`, error.message);
     throw error;
@@ -114,40 +170,60 @@ const sendEmail = async ({ to, subject, html }) => {
 
 // Helper para enviar emails con attachments
 const sendEmailWithAttachments = async ({ to, subject, html, attachments }) => {
-  if (!resend) {
-    throw new Error('Resend no está configurado. Verifica RESEND_API_KEY.');
+  if (!emailService) {
+    throw new Error('Servicio de email no configurado');
   }
 
   try {
-    // Convertir attachments a formato Resend
-    const resendAttachments = await Promise.all(
-      attachments.map(async (file) => {
-        const content = await fs.readFile(file.path);
-        return {
+    if (emailProvider === 'Gmail') {
+      // Nodemailer soporta attachments con CID
+      const nodemailerAttachments = await Promise.all(
+        attachments.map(async (file) => ({
           filename: file.filename,
-          content: content,
-        };
-      })
-    );
+          path: file.path,
+          cid: file.cid
+        }))
+      );
 
-    // Para emails con imágenes, usar attachments tradicionales
-    // Resend no soporta CID embebido como Gmail, así que adjuntamos las imágenes
-    const { data, error } = await resend.emails.send({
-      from: `${CONFIG.EMAIL_FROM_NAME} <${CONFIG.EMAIL_FROM}>`,
-      to: [to],
-      subject: subject,
-      html: html,
-      attachments: resendAttachments,
-    });
+      const info = await emailService.sendMail({
+        from: `"${CONFIG.EMAIL_FROM_NAME}" <${CONFIG.EMAIL_USER}>`,
+        to: to,
+        subject: subject,
+        html: html,
+        attachments: nodemailerAttachments
+      });
+      
+      console.log(`✅ [Gmail] Email con attachments enviado a: ${to}`);
+      return { success: true, id: info.messageId };
+      
+    } else if (emailProvider === 'Resend') {
+      // Resend usa base64 para attachments
+      const resendAttachments = await Promise.all(
+        attachments.map(async (file) => {
+          const content = await fs.readFile(file.path);
+          return {
+            filename: file.filename,
+            content: content.toString('base64'),
+          };
+        })
+      );
 
-    if (error) {
-      console.error(`❌ Error de Resend:`, error);
-      throw error;
+      const { data, error } = await emailService.emails.send({
+        from: `${CONFIG.EMAIL_FROM_NAME} <${CONFIG.EMAIL_FROM}>`,
+        to: [to],
+        subject: subject,
+        html: html,
+        attachments: resendAttachments
+      });
+
+      if (error) {
+        console.error(`❌ [Resend] Error:`, error);
+        throw error;
+      }
+
+      console.log(`✅ [Resend] Email con attachments enviado a: ${to}`);
+      return { success: true, id: data.id };
     }
-
-    console.log(`✅ Email con attachments enviado a: ${to}`);
-    console.log(`   ID: ${data.id}`);
-    return { success: true, id: data.id };
   } catch (error) {
     console.error(`❌ Error enviando email con attachments a ${to}:`, error.message);
     throw error;
@@ -292,7 +368,7 @@ app.post('/api/verify-email', async (req, res) => {
     
     res.status(500).json({ 
       error: errorMessage,
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      details: CONFIG.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -344,15 +420,20 @@ app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), asyn
     console.log(`📧 Iniciando envío masivo a ${emailsDB.length} suscriptores`);
 
     // Preparar attachments
-    const attachments = images.map((file) => ({
+    const attachments = images.map((file, index) => ({
       path: file.path,
       filename: file.originalname,
+      cid: `image${index}`
     }));
 
-    // HTML mejorado (sin CID, solo texto si hay imágenes)
-    let imagesNote = '';
-    if (images.length > 0) {
-      imagesNote = `<p style="color: #666; font-size: 14px; margin-top: 20px;"><em>📎 Este email incluye ${images.length} imagen(es) adjunta(s)</em></p>`;
+    // HTML con imágenes embebidas (funciona con Gmail)
+    let imagesHTML = '';
+    if (emailProvider === 'Gmail') {
+      images.forEach((file, index) => {
+        imagesHTML += `<img src="cid:image${index}" style="max-width: 100%; height: auto; margin: 10px 0;" alt="Imagen ${index + 1}">`;
+      });
+    } else if (images.length > 0) {
+      imagesHTML = `<p style="color: #666; font-size: 14px; margin-top: 20px;"><em>📎 Este email incluye ${images.length} imagen(es) adjunta(s)</em></p>`;
     }
 
     const htmlContent = `
@@ -362,10 +443,11 @@ app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), asyn
         </div>
         <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
           <p style="color: #333; line-height: 1.6; white-space: pre-wrap;">${message}</p>
-          ${imagesNote}
+          ${imagesHTML}
         </div>
         <div style="text-align: center; margin-top: 20px; color: #999; font-size: 12px;">
           <p>Recibiste este email porque te suscribiste a nuestras notificaciones.</p>
+          <p style="font-size: 10px; margin-top: 10px;">Enviado con ${emailProvider}</p>
         </div>
       </div>
     `;
@@ -392,7 +474,7 @@ app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), asyn
         }
         successCount++;
         
-        // Pequeño delay para no sobrecargar la API (opcional)
+        // Pequeño delay para no sobrecargar
         await new Promise(resolve => setTimeout(resolve, 100));
         
       } catch (error) {
@@ -420,7 +502,7 @@ app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), asyn
     console.error('❌ Error en broadcast:', error);
     res.status(500).json({ 
       error: 'Error al enviar emails masivos',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      details: CONFIG.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -446,7 +528,7 @@ app.delete('/api/admin/emails/:email', adminAuth, async (req, res) => {
 // Endpoint de prueba
 app.post('/api/test-email', adminAuth, async (req, res) => {
   try {
-    const testEmail = req.body.email || 'delivered@resend.dev';
+    const testEmail = req.body.email || (emailProvider === 'Gmail' ? CONFIG.EMAIL_USER : 'delivered@resend.dev');
     
     console.log(`🧪 Enviando email de prueba a: ${testEmail}`);
     
@@ -456,10 +538,10 @@ app.post('/api/test-email', adminAuth, async (req, res) => {
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
           <h2 style="color: #d4a574;">✅ Email de Prueba</h2>
-          <p>Si recibes este email, significa que <strong>Resend</strong> está funcionando correctamente.</p>
+          <p>Si recibes este email, significa que <strong>${emailProvider}</strong> está funcionando correctamente.</p>
           <p><strong>Fecha:</strong> ${new Date().toLocaleString('es-ES')}</p>
-          <p><strong>Email de envío:</strong> ${CONFIG.EMAIL_FROM}</p>
-          <p><strong>Servicio:</strong> Resend</p>
+          <p><strong>Servicio:</strong> ${emailProvider}</p>
+          <p><strong>Modo:</strong> ${CONFIG.NODE_ENV}</p>
         </div>
       `
     });
@@ -467,6 +549,7 @@ app.post('/api/test-email', adminAuth, async (req, res) => {
     res.json({
       success: true,
       message: 'Email de prueba enviado correctamente',
+      provider: emailProvider,
       emailId: result.id
     });
 
@@ -483,7 +566,9 @@ app.post('/api/test-email', adminAuth, async (req, res) => {
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    resendConfigured: !!resend,
+    emailProvider: emailProvider,
+    emailConfigured: !!emailService,
+    mode: CONFIG.NODE_ENV,
     emailsCount: emailsDB.length,
     timestamp: new Date().toISOString()
   });
@@ -495,12 +580,12 @@ loadData().then(() => {
     console.log('\n╔════════════════════════════════════════╗');
     console.log('║   🚀 SERVIDOR NEWSLETTER INICIADO     ║');
     console.log('╚════════════════════════════════════════╝');
-    console.log(`\n📍 Backend:  https://newsletter-backend-2iby.onrender.com/`);
+    console.log(`\n📍 Backend:  http://localhost:${CONFIG.PORT}/`);
     console.log(`🌐 Frontend: ${CONFIG.FRONTEND_URL}`);
-    console.log(`📧 Email:    ${CONFIG.EMAIL_FROM}`);
+    console.log(`📧 Provider: ${emailProvider}`);
+    console.log(`🔧 Modo:     ${CONFIG.NODE_ENV}`);
     console.log(`👤 Admin:    ${CONFIG.ADMIN_EMAIL}`);
     console.log(`📊 Emails:   ${emailsDB.length} registrados`);
-    console.log(`✅ Clicks:   ${statsDB.totalClicks}`);
-    console.log(`🔧 Resend:   ${resend ? 'Configurado ✅' : 'No configurado ❌'}\n`);
+    console.log(`✅ Clicks:   ${statsDB.totalClicks}\n`);
   });
 });
