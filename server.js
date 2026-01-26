@@ -71,15 +71,36 @@ const upload = multer({
   }
 });
 
+// transporter con verificación y logs útiles
 const transporter = nodemailer.createTransport({
   host: 'smtp.gmail.com',
   port: 465,
   secure: true,
   auth: {
     user: CONFIG.EMAIL_USER,
-    pass: CONFIG.EMAIL_PASSWORD // App Password de Google
-  }
+    pass: CONFIG.EMAIL_PASSWORD // App Password de Google (sin espacios)
+  },
+  logger: true,
+  debug: true
 });
+
+// Mostrar info mínima (NO imprimir la contraseña)
+console.log('🔎 Email config check ->', {
+  EMAIL_USER: !!CONFIG.EMAIL_USER ? CONFIG.EMAIL_USER : 'NO_DEF',
+  EMAIL_PASSWORD_set: !!CONFIG.EMAIL_PASSWORD,
+  FRONTEND_URL: CONFIG.FRONTEND_URL
+});
+
+// Verificar transporter al inicio
+transporter.verify()
+  .then(() => {
+    console.log('✅ Mailer ready: SMTP connection successful');
+  })
+  .catch((err) => {
+    console.error('❌ Mailer verify failed — check EMAIL_USER / EMAIL_PASSWORD (App Password).');
+    console.error(err && err.message ? err.message : err);
+  });
+
 
 // ===== Middleware de autenticación para endpoints admin =====
 function adminAuth(req, res, next) {
