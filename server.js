@@ -10,7 +10,6 @@ const CONFIG = {
   ADMIN_EMAIL: process.env.ADMIN_EMAIL,
   ADMIN_PASSWORD: process.env.ADMIN_PASSWORD,
 };
-
 // ======================================================
 
 const express = require('express');
@@ -22,11 +21,25 @@ const path = require('path');
 
 const app = express();
 
-// Configuración de CORS para permitir peticiones desde Vite
+// ===== CORS mejorado (permitir Netlify y localhost) =====
+const allowedOrigins = [
+  CONFIG.FRONTEND_URL,       // frontend en Netlify (ej: https://shopdemosg.netlify.app)
+  'http://localhost:5173',   // Vite dev
+  'http://localhost:3000'    // CRA u otros dev servers
+];
+
 app.use(cors({
-  origin: CONFIG.FRONTEND_URL,
+  origin: function (origin, callback) {
+    // Si no hay origin (peticiones desde herramientas como curl / Postman), permitir
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS: ' + origin));
+    }
+  },
   credentials: true
 }));
+
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
 
@@ -46,7 +59,7 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ 
+const upload = multer({
   storage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
   fileFilter: (req, file, cb) => {
@@ -58,17 +71,29 @@ const upload = multer({
   }
 });
 
-
 const transporter = nodemailer.createTransport({
   host: 'smtp.gmail.com',
   port: 465,
-  secure: true, // true para 465
+  secure: true,
   auth: {
     user: CONFIG.EMAIL_USER,
-    pass: CONFIG.EMAIL_PASSWORD // aquí va el App Password de Google
+    pass: CONFIG.EMAIL_PASSWORD // App Password de Google
   }
 });
 
+// ===== Middleware de autenticación para endpoints admin =====
+function adminAuth(req, res, next) {
+  const authHeader = req.headers['authorization'] || '';
+  if (!authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'No autorizado' });
+  }
+  const token = authHeader.split(' ')[1];
+  // Validación mínima: token debe empezar con 'admin-token-'
+  if (!token || !token.startsWith('admin-token-')) {
+    return res.status(401).json({ error: 'No autorizado' });
+  }
+  next();
+}
 
 // Base de datos en memoria
 let emailsDB = [];
@@ -118,12 +143,12 @@ app.post('/api/subscribe', async (req, res) => {
 
     // Verificar si ya existe
     const existingEmail = emailsDB.find(e => e.email === email);
-    
+
     if (existingEmail) {
-      return res.json({ 
-        exists: true, 
+      return res.json({
+        exists: true,
         message: 'Este email ya está registrado',
-        email 
+        email
       });
     }
 
@@ -140,10 +165,10 @@ app.post('/api/subscribe', async (req, res) => {
 
     await saveData();
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: 'Email registrado exitosamente',
-      email 
+      email
     });
 
   } catch (error) {
@@ -184,9 +209,9 @@ app.post('/api/verify-email', async (req, res) => {
     emailRecord.verified = true;
     await saveData();
 
-    res.json({ 
-      success: true, 
-      message: 'Email de verificación enviado' 
+    res.json({
+      success: true,
+      message: 'Email de verificación enviado'
     });
 
   } catch (error) {
@@ -197,22 +222,22 @@ app.post('/api/verify-email', async (req, res) => {
 
 // ============= RUTAS DEL ADMINISTRADOR =============
 
-// Login del admin
+// Login del admin (público)
 app.post('/api/admin/login', (req, res) => {
   const { email, password } = req.body;
 
   if (email === CONFIG.ADMIN_EMAIL && password === CONFIG.ADMIN_PASSWORD) {
-    res.json({ 
-      success: true, 
-      token: 'admin-token-' + Date.now() 
+    res.json({
+      success: true,
+      token: 'admin-token-' + Date.now()
     });
   } else {
     res.status(401).json({ error: 'Credenciales incorrectas' });
   }
 });
 
-// Obtener estadísticas
-app.get('/api/admin/stats', (req, res) => {
+// Obtener estadísticas (PROTEGIDO)
+app.get('/api/admin/stats', adminAuth, (req, res) => {
   const chartData = Object.entries(statsDB.emailsByDay).map(([date, count]) => ({
     date,
     count
@@ -228,8 +253,8 @@ app.get('/api/admin/stats', (req, res) => {
   });
 });
 
-// Enviar email masivo
-app.post('/api/admin/send-broadcast', upload.array('images', 5), async (req, res) => {
+// Enviar email masivo (PROTEGIDO)
+app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), async (req, res) => {
   try {
     const { subject, message } = req.body;
     const images = req.files || [];
@@ -283,8 +308,8 @@ app.post('/api/admin/send-broadcast', upload.array('images', 5), async (req, res
 
     await Promise.all(sendPromises);
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: `Email enviado a ${emailsDB.length} suscriptores`,
       count: emailsDB.length
     });
@@ -295,16 +320,16 @@ app.post('/api/admin/send-broadcast', upload.array('images', 5), async (req, res
   }
 });
 
-// Obtener lista de emails
-app.get('/api/admin/emails', (req, res) => {
+// Obtener lista de emails (PROTEGIDO)
+app.get('/api/admin/emails', adminAuth, (req, res) => {
   res.json({ emails: emailsDB });
 });
 
-// Eliminar email
-app.delete('/api/admin/emails/:email', async (req, res) => {
+// Eliminar email (PROTEGIDO)
+app.delete('/api/admin/emails/:email', adminAuth, async (req, res) => {
   const { email } = req.params;
   const index = emailsDB.findIndex(e => e.email === email);
-  
+
   if (index !== -1) {
     emailsDB.splice(index, 1);
     statsDB.totalEmails--;
@@ -321,7 +346,7 @@ loadData().then(() => {
     console.log('\n╔════════════════════════════════════════╗');
     console.log('║   🚀 SERVIDOR NEWSLETTER INICIADO     ║');
     console.log('╚════════════════════════════════════════╝');
-    console.log(`\n📍 URL Backend:  http://localhost:${CONFIG.PORT}`);
+    console.log(`\n📍 URL Backend:  https://newsletter-backend-2iby.onrender.com/`);
     console.log(`🌐 Frontend:     ${CONFIG.FRONTEND_URL}`);
     console.log(`📧 Email config: ${CONFIG.EMAIL_USER}`);
     console.log(`👤 Admin email:  ${CONFIG.ADMIN_EMAIL}`);

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { LogIn, Mail, TrendingUp, Users, CheckCircle, XCircle, Send, Image, Trash2, BarChart3, Calendar } from 'lucide-react';
 
 // ============= CONFIGURACIÓN - EDITAR AQUÍ =============
-const API_URL = 'http://localhost:5000'; // URL del backend
+const API_URL = 'https://newsletter-backend-2iby.onrender.com'; // URL del backend
 // ======================================================
 
 const AdminPanel = () => {
