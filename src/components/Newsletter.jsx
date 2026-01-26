@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Mail, Check, AlertCircle, Sparkles } from 'lucide-react';
 
 // ============= CONFIGURACIÓN - EDITAR AQUÍ =============
-const API_URL = 'https://newsletter-backend-2iby.onrender.com'; // URL del backend
+const API_URL = import.meta.env.VITE_API_URL || 'https://newsletter-backend-2iby.onrender.com'; // SIN '/' final
 // ======================================================
 
 const Newsletter = () => {
@@ -19,30 +19,42 @@ const Newsletter = () => {
     }
 
     setStatus('loading');
+    setMessage('');
 
     try {
-      const response = await fetch(`${API_URL}/api/subscribe`, {
+      const res = await fetch(`${API_URL}/api/subscribe`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email })
       });
 
-      const data = await response.json();
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok && data.error) {
+        setStatus('error');
+        setMessage(data.error);
+        return;
+      }
 
       if (data.exists) {
         setStatus('exists');
-        setMessage(data.message);
+        setMessage(data.message || 'Este email ya está registrado');
         setShowVerification(true);
       } else if (data.success) {
         setStatus('success');
-        setMessage(data.message);
+        setMessage(data.message || 'Email registrado correctamente');
         setTimeout(() => {
           setEmail('');
           setStatus('idle');
           setMessage('');
         }, 3000);
+      } else {
+        // fallback
+        setStatus('error');
+        setMessage('Respuesta inesperada del servidor');
       }
     } catch (error) {
+      console.error('Subscribe error:', error);
       setStatus('error');
       setMessage('Error al conectar con el servidor');
     }
@@ -50,17 +62,18 @@ const Newsletter = () => {
 
   const handleVerification = async () => {
     setStatus('loading');
-    
+    setMessage('');
+
     try {
-      const response = await fetch(`${API_URL}/api/verify-email`, {
+      const res = await fetch(`${API_URL}/api/verify-email`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email })
       });
 
-      const data = await response.json();
+      const data = await res.json().catch(() => ({}));
 
-      if (data.success) {
+      if (res.ok && data.success) {
         setStatus('success');
         setMessage('¡Email de verificación enviado! Revisa tu bandeja de entrada.');
         setShowVerification(false);
@@ -69,8 +82,12 @@ const Newsletter = () => {
           setStatus('idle');
           setMessage('');
         }, 4000);
+      } else {
+        setStatus('error');
+        setMessage(data.error || 'Error al enviar verificación');
       }
     } catch (error) {
+      console.error('Verify error:', error);
       setStatus('error');
       setMessage('Error al enviar verificación');
     }

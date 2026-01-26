@@ -1,4 +1,3 @@
-// backend/server.js
 require('dotenv').config();
 
 // ============= CONFIGURACIÓN - EDITAR AQUÍ =============
@@ -23,14 +22,13 @@ const app = express();
 
 // ===== CORS mejorado (permitir Netlify y localhost) =====
 const allowedOrigins = [
-  CONFIG.FRONTEND_URL,       // frontend en Netlify (ej: https://shopdemosg.netlify.app)
-  'http://localhost:5173',   // Vite dev
-  'http://localhost:3000'    // CRA u otros dev servers
+  CONFIG.FRONTEND_URL,
+  'http://localhost:5173',
+  'http://localhost:3000'
 ];
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Si no hay origin (peticiones desde herramientas como curl / Postman), permitir
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
@@ -61,7 +59,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) {
       cb(null, true);
@@ -71,36 +69,58 @@ const upload = multer({
   }
 });
 
-// transporter con verificación y logs útiles
+// ========== CONFIGURACIÓN MEJORADA DE NODEMAILER ==========
+// IMPORTANTE: El App Password NO debe tener espacios
+const cleanPassword = CONFIG.EMAIL_PASSWORD ? CONFIG.EMAIL_PASSWORD.replace(/\s/g, '') : '';
+
 const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 465,
-  secure: true,
+  service: 'gmail', // Usar 'service' es más confiable que host/port
   auth: {
     user: CONFIG.EMAIL_USER,
-    pass: CONFIG.EMAIL_PASSWORD // App Password de Google (sin espacios)
+    pass: cleanPassword
   },
-  logger: true,
-  debug: true
+  // Opciones adicionales para mejor debugging
+  tls: {
+    rejectUnauthorized: false
+  }
 });
 
-// Mostrar info mínima (NO imprimir la contraseña)
-console.log('🔎 Email config check ->', {
-  EMAIL_USER: !!CONFIG.EMAIL_USER ? CONFIG.EMAIL_USER : 'NO_DEF',
-  EMAIL_PASSWORD_set: !!CONFIG.EMAIL_PASSWORD,
-  FRONTEND_URL: CONFIG.FRONTEND_URL
-});
+// Mostrar info de configuración
+console.log('\n🔧 CONFIGURACIÓN DE EMAIL:');
+console.log('   Email:', CONFIG.EMAIL_USER || '❌ NO CONFIGURADO');
+console.log('   Password configurado:', cleanPassword ? '✅ SÍ' : '❌ NO');
+console.log('   Password length:', cleanPassword ? cleanPassword.length : 0);
 
-// Verificar transporter al inicio
-transporter.verify()
-  .then(() => {
-    console.log('✅ Mailer ready: SMTP connection successful');
-  })
-  .catch((err) => {
-    console.error('❌ Mailer verify failed — check EMAIL_USER / EMAIL_PASSWORD (App Password).');
-    console.error(err && err.message ? err.message : err);
-  });
-
+// Verificar transporter al inicio con mejor manejo de errores
+const verifyEmailConfig = async () => {
+  try {
+    await transporter.verify();
+    console.log('✅ Configuración de email verificada correctamente');
+    console.log('   Servidor SMTP: smtp.gmail.com');
+    console.log('   Usuario:', CONFIG.EMAIL_USER);
+    return true;
+  } catch (error) {
+    console.error('\n❌ ERROR EN CONFIGURACIÓN DE EMAIL:');
+    console.error('   Mensaje:', error.message);
+    
+    // Diagnóstico específico de errores comunes
+    if (error.message.includes('Invalid login')) {
+      console.error('\n💡 SOLUCIÓN:');
+      console.error('   1. Verifica que EMAIL_USER sea correcto');
+      console.error('   2. Genera un nuevo App Password en:');
+      console.error('      https://myaccount.google.com/apppasswords');
+      console.error('   3. Copia el password SIN espacios');
+      console.error('   4. Asegúrate de tener verificación en 2 pasos activada');
+    } else if (error.message.includes('EAUTH')) {
+      console.error('\n💡 SOLUCIÓN:');
+      console.error('   1. El App Password puede estar incorrecto');
+      console.error('   2. Verifica que no tenga espacios');
+      console.error('   3. Regenera el App Password si es necesario');
+    }
+    
+    return false;
+  }
+};
 
 // ===== Middleware de autenticación para endpoints admin =====
 function adminAuth(req, res, next) {
@@ -109,7 +129,6 @@ function adminAuth(req, res, next) {
     return res.status(401).json({ error: 'No autorizado' });
   }
   const token = authHeader.split(' ')[1];
-  // Validación mínima: token debe empezar con 'admin-token-'
   if (!token || !token.startsWith('admin-token-')) {
     return res.status(401).json({ error: 'No autorizado' });
   }
@@ -132,6 +151,7 @@ const loadData = async () => {
     const statsData = await fs.readFile('data/stats.json', 'utf8');
     emailsDB = JSON.parse(emailsData);
     statsDB = JSON.parse(statsData);
+    console.log(`📊 Datos cargados: ${emailsDB.length} emails registrados`);
   } catch (error) {
     console.log('📝 Iniciando con base de datos vacía');
   }
@@ -159,10 +179,8 @@ app.post('/api/subscribe', async (req, res) => {
       return res.status(400).json({ error: 'Email inválido' });
     }
 
-    // Incrementar clicks
     statsDB.totalClicks++;
 
-    // Verificar si ya existe
     const existingEmail = emailsDB.find(e => e.email === email);
 
     if (existingEmail) {
@@ -173,7 +191,6 @@ app.post('/api/subscribe', async (req, res) => {
       });
     }
 
-    // Agregar nuevo email
     const today = new Date().toISOString().split('T')[0];
     statsDB.emailsByDay[today] = (statsDB.emailsByDay[today] || 0) + 1;
     statsDB.totalEmails++;
@@ -198,7 +215,7 @@ app.post('/api/subscribe', async (req, res) => {
   }
 });
 
-// Enviar email de verificación
+// Enviar email de verificación - CON MEJOR MANEJO DE ERRORES
 app.post('/api/verify-email', async (req, res) => {
   try {
     const { email } = req.body;
@@ -208,8 +225,10 @@ app.post('/api/verify-email', async (req, res) => {
       return res.status(404).json({ error: 'Email no encontrado' });
     }
 
+    console.log(`📧 Intentando enviar verificación a: ${email}`);
+
     const mailOptions = {
-      from: CONFIG.EMAIL_USER,
+      from: `"Newsletter Demo" <${CONFIG.EMAIL_USER}>`, // Nombre + email
       to: email,
       subject: 'Verifica tu suscripción',
       html: `
@@ -224,26 +243,47 @@ app.post('/api/verify-email', async (req, res) => {
       `
     };
 
-    await transporter.sendMail(mailOptions);
+    const info = await transporter.sendMail(mailOptions);
+    
+    console.log('✅ Email enviado exitosamente');
+    console.log('   Message ID:', info.messageId);
+    console.log('   Response:', info.response);
 
-    // Marcar como verificado
     emailRecord.verified = true;
     await saveData();
 
     res.json({
       success: true,
-      message: 'Email de verificación enviado'
+      message: 'Email de verificación enviado correctamente'
     });
 
   } catch (error) {
-    console.error('❌ Error enviando verificación:', error);
-    res.status(500).json({ error: 'Error al enviar email de verificación' });
+    console.error('❌ ERROR al enviar email de verificación:');
+    console.error('   Tipo:', error.name);
+    console.error('   Mensaje:', error.message);
+    console.error('   Code:', error.code);
+    
+    // Respuesta más específica según el error
+    let errorMessage = 'Error al enviar email de verificación';
+    
+    if (error.message.includes('Invalid login')) {
+      errorMessage = 'Error de autenticación del servidor de email. Contacta al administrador.';
+    } else if (error.code === 'EAUTH') {
+      errorMessage = 'Credenciales de email incorrectas. Contacta al administrador.';
+    } else if (error.code === 'ECONNECTION') {
+      errorMessage = 'No se pudo conectar al servidor de email. Intenta de nuevo más tarde.';
+    }
+    
+    res.status(500).json({ 
+      error: errorMessage,
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
 // ============= RUTAS DEL ADMINISTRADOR =============
 
-// Login del admin (público)
+// Login del admin
 app.post('/api/admin/login', (req, res) => {
   const { email, password } = req.body;
 
@@ -257,7 +297,7 @@ app.post('/api/admin/login', (req, res) => {
   }
 });
 
-// Obtener estadísticas (PROTEGIDO)
+// Obtener estadísticas
 app.get('/api/admin/stats', adminAuth, (req, res) => {
   const chartData = Object.entries(statsDB.emailsByDay).map(([date, count]) => ({
     date,
@@ -274,7 +314,7 @@ app.get('/api/admin/stats', adminAuth, (req, res) => {
   });
 });
 
-// Enviar email masivo (PROTEGIDO)
+// Enviar email masivo - CON MEJOR MANEJO DE ERRORES
 app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), async (req, res) => {
   try {
     const { subject, message } = req.body;
@@ -288,14 +328,14 @@ app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), asyn
       return res.status(400).json({ error: 'No hay emails registrados' });
     }
 
-    // Preparar attachments para las imágenes
+    console.log(`📧 Iniciando envío masivo a ${emailsDB.length} suscriptores`);
+
     const attachments = images.map((file, index) => ({
       filename: file.originalname,
       path: file.path,
       cid: `image${index}`
     }));
 
-    // Generar HTML con imágenes embebidas
     let imagesHTML = '';
     images.forEach((file, index) => {
       imagesHTML += `<img src="cid:image${index}" style="max-width: 100%; height: auto; margin: 10px 0;" alt="Imagen ${index + 1}">`;
@@ -316,37 +356,58 @@ app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), asyn
       </div>
     `;
 
-    // Enviar a todos los emails
-    const sendPromises = emailsDB.map(record => {
-      return transporter.sendMail({
-        from: CONFIG.EMAIL_USER,
-        to: record.email,
-        subject: subject,
-        html: htmlContent,
-        attachments: attachments
-      });
-    });
+    // Enviar emails con manejo individual de errores
+    let successCount = 0;
+    let failedEmails = [];
 
-    await Promise.all(sendPromises);
+    for (const record of emailsDB) {
+      try {
+        await transporter.sendMail({
+          from: `"Newsletter Demo" <${CONFIG.EMAIL_USER}>`,
+          to: record.email,
+          subject: subject,
+          html: htmlContent,
+          attachments: attachments
+        });
+        successCount++;
+        console.log(`✅ Enviado a: ${record.email}`);
+      } catch (error) {
+        failedEmails.push(record.email);
+        console.error(`❌ Error enviando a ${record.email}:`, error.message);
+      }
+    }
+
+    console.log(`\n📊 Resultado del envío masivo:`);
+    console.log(`   Exitosos: ${successCount}/${emailsDB.length}`);
+    console.log(`   Fallidos: ${failedEmails.length}`);
+
+    if (failedEmails.length > 0) {
+      console.log(`   Emails fallidos:`, failedEmails);
+    }
 
     res.json({
       success: true,
-      message: `Email enviado a ${emailsDB.length} suscriptores`,
-      count: emailsDB.length
+      message: `Email enviado a ${successCount} de ${emailsDB.length} suscriptores`,
+      count: successCount,
+      failed: failedEmails.length,
+      failedEmails: failedEmails
     });
 
   } catch (error) {
-    console.error('❌ Error enviando broadcast:', error);
-    res.status(500).json({ error: 'Error al enviar emails masivos' });
+    console.error('❌ Error en broadcast:', error);
+    res.status(500).json({ 
+      error: 'Error al enviar emails masivos',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
-// Obtener lista de emails (PROTEGIDO)
+// Obtener lista de emails
 app.get('/api/admin/emails', adminAuth, (req, res) => {
   res.json({ emails: emailsDB });
 });
 
-// Eliminar email (PROTEGIDO)
+// Eliminar email
 app.delete('/api/admin/emails/:email', adminAuth, async (req, res) => {
   const { email } = req.params;
   const index = emailsDB.findIndex(e => e.email === email);
@@ -361,8 +422,50 @@ app.delete('/api/admin/emails/:email', adminAuth, async (req, res) => {
   }
 });
 
+// Endpoint de prueba de email
+app.post('/api/test-email', adminAuth, async (req, res) => {
+  try {
+    const testEmail = req.body.email || CONFIG.EMAIL_USER;
+    
+    console.log(`🧪 Enviando email de prueba a: ${testEmail}`);
+    
+    const info = await transporter.sendMail({
+      from: `"Newsletter Demo" <${CONFIG.EMAIL_USER}>`,
+      to: testEmail,
+      subject: 'Email de Prueba - Newsletter',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <h2 style="color: #d4a574;">✅ Email de Prueba</h2>
+          <p>Si recibes este email, significa que la configuración está funcionando correctamente.</p>
+          <p><strong>Fecha:</strong> ${new Date().toLocaleString('es-ES')}</p>
+          <p><strong>Email de envío:</strong> ${CONFIG.EMAIL_USER}</p>
+        </div>
+      `
+    });
+
+    console.log('✅ Email de prueba enviado exitosamente');
+    console.log('   Message ID:', info.messageId);
+    
+    res.json({
+      success: true,
+      message: 'Email de prueba enviado correctamente',
+      messageId: info.messageId
+    });
+
+  } catch (error) {
+    console.error('❌ Error en email de prueba:', error);
+    res.status(500).json({
+      error: 'Error al enviar email de prueba',
+      details: error.message
+    });
+  }
+});
+
 // Iniciar servidor
-loadData().then(() => {
+loadData().then(async () => {
+  // Verificar configuración de email antes de iniciar
+  await verifyEmailConfig();
+  
   app.listen(CONFIG.PORT, () => {
     console.log('\n╔════════════════════════════════════════╗');
     console.log('║   🚀 SERVIDOR NEWSLETTER INICIADO     ║');

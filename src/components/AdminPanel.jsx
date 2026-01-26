@@ -1,12 +1,17 @@
+// src/pages/AdminPanel.jsx
 import React, { useState, useEffect } from 'react';
-import { LogIn, Mail, TrendingUp, Users, CheckCircle, XCircle, Send, Image, Trash2, BarChart3, Calendar } from 'lucide-react';
+import {
+  LogIn, Mail, TrendingUp, Users, CheckCircle, XCircle,
+  Send, Image, Trash2, BarChart3, Calendar
+} from 'lucide-react';
 
 // ============= CONFIGURACIÓN - EDITAR AQUÍ =============
-const API_URL = 'https://newsletter-backend-2iby.onrender.com'; // URL del backend
+const API_URL = import.meta.env.VITE_API_URL || 'https://newsletter-backend-2iby.onrender.com';
 // ======================================================
 
 const AdminPanel = () => {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [token, setToken] = useState(localStorage.getItem('admin_token') || '');
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [stats, setStats] = useState(null);
@@ -19,52 +24,100 @@ const AdminPanel = () => {
 
   const showNotification = (message, type = 'success') => {
     setNotification({ show: true, message, type });
-    setTimeout(() => setNotification({ show: false, message: '', type: '' }), 3000);
+    setTimeout(() => setNotification({ show: false, message: '', type: '' }), 3500);
   };
 
+  // ----- Auth helpers -----
+  const saveToken = (t) => {
+    setToken(t);
+    localStorage.setItem('admin_token', t);
+    setIsLoggedIn(true);
+  };
+
+  const doLogout = (msg) => {
+    setToken('');
+    localStorage.removeItem('admin_token');
+    setIsLoggedIn(false);
+    setStats(null);
+    setEmailList([]);
+    if (msg) showNotification(msg, 'error');
+  };
+
+  // ----- API call helpers with auth header -----
+  const authHeaders = (extra = {}) => {
+    return {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...extra
+    };
+  };
+
+  const fetchJson = async (url, opts = {}) => {
+    const res = await fetch(url, {
+      ...opts,
+      headers: {
+        ...(opts.headers || {}),
+        ...(opts.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
+        ...(opts.headers || {}),
+      }
+    });
+    // handle 401 centrally
+    if (res.status === 401) {
+      doLogout('Sesión expirada. Por favor ingresa de nuevo.');
+      throw new Error('No autorizado');
+    }
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, data };
+  };
+
+  // ----- Login -----
   const handleLogin = async () => {
     try {
-      const response = await fetch(`${API_URL}/api/admin/login`, {
+      const { ok, data } = await fetchJson(`${API_URL}/api/admin/login`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: loginEmail, password: loginPassword })
+        body: JSON.stringify({ email: loginEmail, password: loginPassword }),
       });
 
-      const data = await response.json();
-
-      if (data.success) {
-        setIsLoggedIn(true);
-        loadStats();
-        loadEmails();
-        showNotification('Sesión iniciada correctamente');
+      if (ok && data.success && data.token) {
+        saveToken(data.token);
+        setLoginEmail(''); setLoginPassword('');
+        await loadStats(data.token);
+        await loadEmails(data.token);
+        showNotification('Sesión iniciada correctamente', 'success');
       } else {
-        showNotification('Credenciales incorrectas', 'error');
+        showNotification(data.error || 'Credenciales incorrectas', 'error');
       }
-    } catch (error) {
-      showNotification('Error al conectar con el servidor', 'error');
+    } catch (err) {
+      // fetchJson ya hace logout si 401
+      if (err.message !== 'No autorizado') showNotification('Error al conectar con el servidor', 'error');
     }
   };
 
-  const loadStats = async () => {
+  // ----- Load stats & emails (send auth header) -----
+  const loadStats = async (t = token) => {
     try {
-      const response = await fetch(`${API_URL}/api/admin/stats`);
-      const data = await response.json();
+      const headers = t ? { Authorization: `Bearer ${t}` } : {};
+      const res = await fetch(`${API_URL}/api/admin/stats`, { headers });
+      if (res.status === 401) return doLogout('No autorizado');
+      const data = await res.json();
       setStats(data);
     } catch (error) {
       console.error('Error cargando estadísticas:', error);
     }
   };
 
-  const loadEmails = async () => {
+  const loadEmails = async (t = token) => {
     try {
-      const response = await fetch(`${API_URL}/api/admin/emails`);
-      const data = await response.json();
-      setEmailList(data.emails);
+      const headers = t ? { Authorization: `Bearer ${t}` } : {};
+      const res = await fetch(`${API_URL}/api/admin/emails`, { headers });
+      if (res.status === 401) return doLogout('No autorizado');
+      const data = await res.json();
+      setEmailList(data.emails || []);
     } catch (error) {
       console.error('Error cargando emails:', error);
     }
   };
 
+  // ----- Images / broadcast -----
   const handleImageChange = (e) => {
     const files = Array.from(e.target.files);
     if (files.length + images.length > 5) {
@@ -85,58 +138,80 @@ const AdminPanel = () => {
     }
 
     setSending(true);
-
     try {
       const formData = new FormData();
       formData.append('subject', subject);
       formData.append('message', broadcastMessage);
       images.forEach(image => formData.append('images', image));
 
-      const response = await fetch(`${API_URL}/api/admin/send-broadcast`, {
+      const res = await fetch(`${API_URL}/api/admin/send-broadcast`, {
         method: 'POST',
-        body: formData
+        body: formData,
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
       });
 
-      const data = await response.json();
+      if (res.status === 401) return doLogout('No autorizado');
 
-      if (data.success) {
-        showNotification(`Email enviado a ${data.count} suscriptores`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showNotification(`Email enviado a ${data.count} suscriptores`, 'success');
         setSubject('');
         setBroadcastMessage('');
         setImages([]);
         loadStats();
       } else {
-        showNotification('Error al enviar emails', 'error');
+        showNotification(data.error || 'Error al enviar emails', 'error');
       }
     } catch (error) {
+      console.error(error);
       showNotification('Error al enviar broadcast', 'error');
     } finally {
       setSending(false);
     }
   };
 
+  // ----- Delete email -----
   const handleDeleteEmail = async (email) => {
     if (!confirm(`¿Eliminar ${email}?`)) return;
 
     try {
-      await fetch(`${API_URL}/api/admin/emails/${encodeURIComponent(email)}`, {
-        method: 'DELETE'
+      const res = await fetch(`${API_URL}/api/admin/emails/${encodeURIComponent(email)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
       });
-      showNotification('Email eliminado');
-      loadEmails();
-      loadStats();
+
+      if (res.status === 401) return doLogout('No autorizado');
+      if (res.ok) {
+        showNotification('Email eliminado', 'success');
+        loadEmails();
+        loadStats();
+      } else {
+        const data = await res.json().catch(()=>({}));
+        showNotification(data.error || 'Error al eliminar email', 'error');
+      }
     } catch (error) {
+      console.error(error);
       showNotification('Error al eliminar email', 'error');
     }
   };
 
+  // ----- Effect: on token change, load data -----
   useEffect(() => {
-    if (isLoggedIn) {
+    if (token) {
+      setIsLoggedIn(true);
+      loadStats();
+      loadEmails();
       const interval = setInterval(loadStats, 30000);
       return () => clearInterval(interval);
+    } else {
+      setIsLoggedIn(false);
     }
-  }, [isLoggedIn]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
 
+  // ----- UI -----
   if (!isLoggedIn) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-[#faf8f5] to-[#f5f0e8] flex items-center justify-center p-4">
@@ -172,6 +247,7 @@ const AdminPanel = () => {
             >
               Iniciar Sesión
             </button>
+            <p className="text-xs text-gray-500 mt-2">Usa las credenciales definidas en las variables de entorno del backend.</p>
           </div>
         </div>
       </div>
@@ -181,18 +257,23 @@ const AdminPanel = () => {
   return (
     <div className="min-h-screen bg-gradient-to-br from-[#faf8f5] to-[#f5f0e8] p-4 sm:p-6 lg:p-8">
       {notification.show && (
-        <div className={`fixed top-4 right-4 z-50 px-6 py-4 rounded-xl shadow-lg ${
-          notification.type === 'error' ? 'bg-red-500' : 'bg-green-500'
-        } text-white font-medium`}>
+        <div className={`fixed top-4 right-4 z-50 px-6 py-4 rounded-xl shadow-lg ${notification.type === 'error' ? 'bg-red-500' : 'bg-green-500'} text-white font-medium`}>
           {notification.message}
         </div>
       )}
 
       <div className="max-w-7xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold text-gray-800 mb-2">Panel Administrativo</h1>
-          <p className="text-gray-600">Gestiona suscriptores y envía campañas</p>
+        <div className="flex justify-between items-center mb-6">
+          <div>
+            <h1 className="text-4xl font-bold text-gray-800 mb-2">Panel Administrativo</h1>
+            <p className="text-gray-600">Gestiona suscriptores y envía campañas</p>
+          </div>
+          <div>
+            <button onClick={() => { doLogout(); showNotification('Sesión cerrada', 'success'); }} className="px-3 py-2 border rounded">Cerrar sesión</button>
+          </div>
         </div>
+
+        {/* --- Estadísticas y resto del UI (igual que tu versión, usando stats, emailList, etc) --- */}
 
         {stats && (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
@@ -242,6 +323,7 @@ const AdminPanel = () => {
           </div>
         )}
 
+        {/* --- Chart & recent emails --- */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
           <div className="bg-white rounded-2xl p-6 shadow-lg">
             <div className="flex items-center gap-3 mb-6">
@@ -257,7 +339,7 @@ const AdminPanel = () => {
                       <span className="text-sm text-gray-600">{new Date(item.date).toLocaleDateString('es-ES', { month: 'short', day: 'numeric' })}</span>
                     </div>
                     <div className="flex-1 bg-gray-100 rounded-full h-8 overflow-hidden">
-                      <div 
+                      <div
                         className="bg-gradient-to-r from-[#d4a574] to-[#c89b68] h-full rounded-full flex items-center justify-end pr-3"
                         style={{ width: `${(item.count / Math.max(...stats.chartData.map(d => d.count))) * 100}%` }}
                       >
@@ -304,6 +386,7 @@ const AdminPanel = () => {
           </div>
         </div>
 
+        {/* --- Broadcast form --- */}
         <div className="bg-white rounded-2xl p-6 shadow-lg">
           <div className="flex items-center gap-3 mb-6">
             <Send className="w-6 h-6 text-[#d4a574]" />
