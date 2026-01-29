@@ -6,11 +6,12 @@ const CONFIG = {
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:5555',
   NODE_ENV: process.env.NODE_ENV || 'production',
   USE_GMAIL: process.env.USE_GMAIL === 'true',
+  MONGODB_URI: process.env.MONGODB_URI,
   
   // Resend (producción)
   RESEND_API_KEY: process.env.RESEND_API_KEY,
   EMAIL_FROM: process.env.EMAIL_FROM || 'onboarding@resend.dev',
-  EMAIL_FROM_NAME: process.env.EMAIL_FROM_NAME || 'Newsletter Demo',
+  EMAIL_FROM_NAME: process.env.EMAIL_FROM_NAME || 'NOTI Demo',
   
   // Gmail (desarrollo local)
   EMAIL_USER: process.env.EMAIL_USER,
@@ -34,7 +35,7 @@ const app = express();
 const allowedOrigins = [
   CONFIG.FRONTEND_URL,
   'http://localhost:5173',
-  'http://localhost:5555',
+  'http://localhost:5556',
   'http://localhost:3000',
   'https://shopdemosg.netlify.app'
 ];
@@ -52,6 +53,179 @@ app.use(cors({
 
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
+
+// ========== CONFIGURACIÓN DUAL: MONGODB O JSON FILES ==========
+let useMongoDB = false;
+let mongoose, Email, Stats;
+
+if (CONFIG.MONGODB_URI) {
+  // Usar MongoDB (producción)
+  mongoose = require('mongoose');
+  
+  mongoose.connect(CONFIG.MONGODB_URI)
+    .then(() => {
+      console.log('✅ MongoDB conectado correctamente');
+      console.log('   Base de datos persistente activada');
+      useMongoDB = true;
+    })
+    .catch((err) => {
+      console.error('❌ Error conectando a MongoDB:', err.message);
+      console.error('💡 Cambiando a archivos JSON locales como respaldo');
+      useMongoDB = false;
+    });
+
+  // Modelos de MongoDB
+  const emailSchema = new mongoose.Schema({
+    email: { type: String, required: true, unique: true },
+    subscribedAt: { type: Date, default: Date.now },
+    verified: { type: Boolean, default: false }
+  });
+
+  const statsSchema = new mongoose.Schema({
+    totalClicks: { type: Number, default: 0 },
+    emailsByDay: { type: Map, of: Number, default: {} },
+    totalEmails: { type: Number, default: 0 },
+    lastUpdated: { type: Date, default: Date.now }
+  });
+
+  Email = mongoose.model('Email', emailSchema);
+  Stats = mongoose.model('Stats', statsSchema);
+} else {
+  // Usar archivos JSON (desarrollo)
+  console.log('📁 Usando archivos JSON locales para almacenamiento');
+  console.log('   Los datos se guardarán en backend/data/');
+}
+
+// Base de datos en memoria (para modo JSON)
+let emailsDB = [];
+let statsDB = {
+  totalClicks: 0,
+  emailsByDay: {},
+  totalEmails: 0,
+  lastUpdated: new Date()
+};
+
+// ========== HELPERS PARA DATOS ==========
+
+// Cargar datos desde JSON (solo en modo local)
+const loadDataFromJSON = async () => {
+  if (useMongoDB) return;
+  
+  try {
+    const emailsData = await fs.readFile('data/emails.json', 'utf8');
+    const statsData = await fs.readFile('data/stats.json', 'utf8');
+    emailsDB = JSON.parse(emailsData);
+    statsDB = JSON.parse(statsData);
+    console.log(`📊 Datos cargados desde JSON: ${emailsDB.length} emails registrados`);
+  } catch (error) {
+    console.log('📝 Iniciando con base de datos vacía (archivos JSON)');
+  }
+};
+
+// Guardar datos en JSON (solo en modo local)
+const saveDataToJSON = async () => {
+  if (useMongoDB) return;
+  
+  try {
+    await fs.mkdir('data', { recursive: true });
+    await fs.writeFile('data/emails.json', JSON.stringify(emailsDB, null, 2));
+    await fs.writeFile('data/stats.json', JSON.stringify(statsDB, null, 2));
+  } catch (error) {
+    console.error('❌ Error guardando datos en JSON:', error);
+  }
+};
+
+// Obtener/crear stats (unificado para MongoDB y JSON)
+const getStats = async () => {
+  if (useMongoDB) {
+    let stats = await Stats.findOne();
+    if (!stats) {
+      stats = await Stats.create({
+        totalClicks: 0,
+        emailsByDay: {},
+        totalEmails: 0
+      });
+    }
+    return stats;
+  } else {
+    return statsDB;
+  }
+};
+
+// Guardar stats (unificado)
+const saveStats = async (stats) => {
+  if (useMongoDB) {
+    await stats.save();
+  } else {
+    await saveDataToJSON();
+  }
+};
+
+// Buscar email (unificado)
+const findEmail = async (emailAddress) => {
+  if (useMongoDB) {
+    return await Email.findOne({ email: emailAddress });
+  } else {
+    return emailsDB.find(e => e.email === emailAddress);
+  }
+};
+
+// Crear email (unificado)
+const createEmail = async (emailAddress) => {
+  if (useMongoDB) {
+    return await Email.create({
+      email: emailAddress,
+      subscribedAt: new Date(),
+      verified: false
+    });
+  } else {
+    const newEmail = {
+      email: emailAddress,
+      subscribedAt: new Date().toISOString(),
+      verified: false
+    };
+    emailsDB.push(newEmail);
+    await saveDataToJSON();
+    return newEmail;
+  }
+};
+
+// Obtener todos los emails (unificado)
+const getAllEmails = async () => {
+  if (useMongoDB) {
+    return await Email.find().sort({ subscribedAt: -1 });
+  } else {
+    return [...emailsDB].reverse();
+  }
+};
+
+// Contar emails (unificado)
+const countEmails = async (filter = {}) => {
+  if (useMongoDB) {
+    return await Email.countDocuments(filter);
+  } else {
+    if (filter.verified !== undefined) {
+      return emailsDB.filter(e => e.verified === filter.verified).length;
+    }
+    return emailsDB.length;
+  }
+};
+
+// Eliminar email (unificado)
+const deleteEmail = async (emailAddress) => {
+  if (useMongoDB) {
+    const result = await Email.deleteOne({ email: emailAddress });
+    return result.deletedCount > 0;
+  } else {
+    const index = emailsDB.findIndex(e => e.email === emailAddress);
+    if (index !== -1) {
+      emailsDB.splice(index, 1);
+      await saveDataToJSON();
+      return true;
+    }
+    return false;
+  }
+};
 
 // Configuración de multer para imágenes
 const storage = multer.diskStorage({
@@ -86,7 +260,6 @@ let emailService = null;
 let emailProvider = 'unknown';
 
 if (CONFIG.USE_GMAIL && CONFIG.EMAIL_USER && CONFIG.EMAIL_PASSWORD) {
-  // Modo desarrollo: usar Gmail/Nodemailer
   const nodemailer = require('nodemailer');
   
   emailService = nodemailer.createTransport({
@@ -95,22 +268,18 @@ if (CONFIG.USE_GMAIL && CONFIG.EMAIL_USER && CONFIG.EMAIL_PASSWORD) {
       user: CONFIG.EMAIL_USER,
       pass: CONFIG.EMAIL_PASSWORD.replace(/\s/g, '')
     },
-    tls: {
-      rejectUnauthorized: false
-    }
+    tls: { rejectUnauthorized: false }
   });
   
   emailProvider = 'Gmail';
   console.log('📧 Modo DESARROLLO: Usando Gmail/Nodemailer');
   console.log('   Email:', CONFIG.EMAIL_USER);
   
-  // Verificar conexión
   emailService.verify()
     .then(() => console.log('✅ Gmail configurado correctamente'))
     .catch((err) => console.error('❌ Error en Gmail:', err.message));
     
 } else if (CONFIG.RESEND_API_KEY) {
-  // Modo producción: usar Resend
   const { Resend } = require('resend');
   emailService = new Resend(CONFIG.RESEND_API_KEY);
   emailProvider = 'Resend';
@@ -120,8 +289,6 @@ if (CONFIG.USE_GMAIL && CONFIG.EMAIL_USER && CONFIG.EMAIL_PASSWORD) {
   console.log('   From Name:', CONFIG.EMAIL_FROM_NAME);
 } else {
   console.error('❌ No hay servicio de email configurado');
-  console.error('💡 Para desarrollo: configura USE_GMAIL=true, EMAIL_USER y EMAIL_PASSWORD');
-  console.error('💡 Para producción: configura RESEND_API_KEY');
 }
 
 // Helper unificado para enviar emails
@@ -132,7 +299,6 @@ const sendEmail = async ({ to, subject, html }) => {
 
   try {
     if (emailProvider === 'Gmail') {
-      // Enviar con Nodemailer/Gmail
       const info = await emailService.sendMail({
         from: `"${CONFIG.EMAIL_FROM_NAME}" <${CONFIG.EMAIL_USER}>`,
         to: to,
@@ -141,11 +307,9 @@ const sendEmail = async ({ to, subject, html }) => {
       });
       
       console.log(`✅ [Gmail] Email enviado a: ${to}`);
-      console.log(`   Message ID: ${info.messageId}`);
       return { success: true, id: info.messageId };
       
     } else if (emailProvider === 'Resend') {
-      // Enviar con Resend
       const { data, error } = await emailService.emails.send({
         from: `${CONFIG.EMAIL_FROM_NAME} <${CONFIG.EMAIL_FROM}>`,
         to: [to],
@@ -159,7 +323,6 @@ const sendEmail = async ({ to, subject, html }) => {
       }
 
       console.log(`✅ [Resend] Email enviado a: ${to}`);
-      console.log(`   ID: ${data.id}`);
       return { success: true, id: data.id };
     }
   } catch (error) {
@@ -176,7 +339,6 @@ const sendEmailWithAttachments = async ({ to, subject, html, attachments }) => {
 
   try {
     if (emailProvider === 'Gmail') {
-      // Nodemailer soporta attachments con CID
       const nodemailerAttachments = await Promise.all(
         attachments.map(async (file) => ({
           filename: file.filename,
@@ -197,7 +359,6 @@ const sendEmailWithAttachments = async ({ to, subject, html, attachments }) => {
       return { success: true, id: info.messageId };
       
     } else if (emailProvider === 'Resend') {
-      // Resend usa base64 para attachments
       const resendAttachments = await Promise.all(
         attachments.map(async (file) => {
           const content = await fs.readFile(file.path);
@@ -243,77 +404,56 @@ function adminAuth(req, res, next) {
   next();
 }
 
-// Base de datos en memoria
-let emailsDB = [];
-let statsDB = {
-  totalClicks: 0,
-  emailsByDay: {},
-  totalEmails: 0,
-  lastUpdated: new Date()
-};
-
-// Cargar datos
-const loadData = async () => {
-  try {
-    const emailsData = await fs.readFile('data/emails.json', 'utf8');
-    const statsData = await fs.readFile('data/stats.json', 'utf8');
-    emailsDB = JSON.parse(emailsData);
-    statsDB = JSON.parse(statsData);
-    console.log(`📊 Datos cargados: ${emailsDB.length} emails registrados`);
-  } catch (error) {
-    console.log('📝 Iniciando con base de datos vacía');
-  }
-};
-
-// Guardar datos
-const saveData = async () => {
-  try {
-    await fs.mkdir('data', { recursive: true });
-    await fs.writeFile('data/emails.json', JSON.stringify(emailsDB, null, 2));
-    await fs.writeFile('data/stats.json', JSON.stringify(statsDB, null, 2));
-  } catch (error) {
-    console.error('❌ Error guardando datos:', error);
-  }
-};
-
 // ============= RUTAS DEL CLIENTE =============
 
 app.post('/api/subscribe', async (req, res) => {
   try {
-    const { email } = req.body;
+    const { email: emailAddress } = req.body;
 
-    if (!email || !email.includes('@')) {
+    if (!emailAddress || !emailAddress.includes('@')) {
       return res.status(400).json({ error: 'Email inválido' });
     }
 
-    statsDB.totalClicks++;
+    // Incrementar clicks
+    const stats = await getStats();
+    if (useMongoDB) {
+      stats.totalClicks++;
+    } else {
+      stats.totalClicks++;
+    }
 
-    const existingEmail = emailsDB.find(e => e.email === email);
+    // Verificar si ya existe
+    const existingEmail = await findEmail(emailAddress);
 
     if (existingEmail) {
+      await saveStats(stats);
       return res.json({
         exists: true,
         message: 'Este email ya está registrado',
-        email
+        email: emailAddress
       });
     }
 
+    // Agregar nuevo email
     const today = new Date().toISOString().split('T')[0];
-    statsDB.emailsByDay[today] = (statsDB.emailsByDay[today] || 0) + 1;
-    statsDB.totalEmails++;
+    if (useMongoDB) {
+      const dayCount = stats.emailsByDay.get(today) || 0;
+      stats.emailsByDay.set(today, dayCount + 1);
+      stats.totalEmails++;
+    } else {
+      stats.emailsByDay[today] = (stats.emailsByDay[today] || 0) + 1;
+      stats.totalEmails++;
+    }
+    
+    await createEmail(emailAddress);
+    await saveStats(stats);
 
-    emailsDB.push({
-      email,
-      subscribedAt: new Date().toISOString(),
-      verified: false
-    });
-
-    await saveData();
+    console.log(`📊 Nuevo email registrado: ${emailAddress}`);
 
     res.json({
       success: true,
       message: 'Email registrado exitosamente',
-      email
+      email: emailAddress
     });
 
   } catch (error) {
@@ -324,20 +464,20 @@ app.post('/api/subscribe', async (req, res) => {
 
 app.post('/api/verify-email', async (req, res) => {
   try {
-    const { email } = req.body;
+    const { email: emailAddress } = req.body;
 
-    const emailRecord = emailsDB.find(e => e.email === email);
+    const emailRecord = await findEmail(emailAddress);
     if (!emailRecord) {
       return res.status(404).json({ error: 'Email no encontrado' });
     }
 
-    console.log(`📧 Enviando verificación a: ${email}`);
+    console.log(`📧 Enviando verificación a: ${emailAddress}`);
 
     const htmlContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <h2 style="color: #d4a574;">¡Bienvenido!</h2>
         <p>Gracias por suscribirte a nuestras notificaciones.</p>
-        <p>Tu email <strong>${email}</strong> ha sido registrado correctamente.</p>
+        <p>Tu email <strong>${emailAddress}</strong> ha sido registrado correctamente.</p>
         <p>Recibirás nuestras actualizaciones y eventos especiales.</p>
         <hr style="border: 1px solid #f0f0f0; margin: 20px 0;">
         <p style="color: #666; font-size: 12px;">Si no solicitaste esta suscripción, puedes ignorar este email.</p>
@@ -345,13 +485,18 @@ app.post('/api/verify-email', async (req, res) => {
     `;
 
     await sendEmail({
-      to: email,
-      subject: 'Verifica tu suscripción - Newsletter Demo',
+      to: emailAddress,
+      subject: 'Verifica tu suscripción - NOTI Demo',
       html: htmlContent
     });
 
+    // Marcar como verificado
     emailRecord.verified = true;
-    await saveData();
+    if (useMongoDB) {
+      await emailRecord.save();
+    } else {
+      await saveDataToJSON();
+    }
 
     res.json({
       success: true,
@@ -388,20 +533,38 @@ app.post('/api/admin/login', (req, res) => {
   }
 });
 
-app.get('/api/admin/stats', adminAuth, (req, res) => {
-  const chartData = Object.entries(statsDB.emailsByDay).map(([date, count]) => ({
-    date,
-    count
-  })).sort((a, b) => new Date(a.date) - new Date(b.date));
+app.get('/api/admin/stats', adminAuth, async (req, res) => {
+  try {
+    const stats = await getStats();
+    const emails = await getAllEmails();
+    
+    // Convertir datos para el chart
+    let chartData;
+    if (useMongoDB) {
+      chartData = Array.from(stats.emailsByDay.entries())
+        .map(([date, count]) => ({ date, count }))
+        .sort((a, b) => new Date(a.date) - new Date(b.date));
+    } else {
+      chartData = Object.entries(stats.emailsByDay)
+        .map(([date, count]) => ({ date, count }))
+        .sort((a, b) => new Date(a.date) - new Date(b.date));
+    }
 
-  res.json({
-    totalClicks: statsDB.totalClicks,
-    totalEmails: statsDB.totalEmails,
-    verifiedEmails: emailsDB.filter(e => e.verified).length,
-    unverifiedEmails: emailsDB.filter(e => !e.verified).length,
-    chartData,
-    recentEmails: emailsDB.slice(-10).reverse()
-  });
+    const verifiedCount = await countEmails({ verified: true });
+    const unverifiedCount = await countEmails({ verified: false });
+
+    res.json({
+      totalClicks: stats.totalClicks,
+      totalEmails: stats.totalEmails,
+      verifiedEmails: verifiedCount,
+      unverifiedEmails: unverifiedCount,
+      chartData,
+      recentEmails: emails.slice(0, 10)
+    });
+  } catch (error) {
+    console.error('❌ Error obteniendo stats:', error);
+    res.status(500).json({ error: 'Error obteniendo estadísticas' });
+  }
 });
 
 app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), async (req, res) => {
@@ -413,20 +576,19 @@ app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), asyn
       return res.status(400).json({ error: 'Asunto y mensaje son requeridos' });
     }
 
-    if (emailsDB.length === 0) {
+    const totalEmails = await countEmails();
+    if (totalEmails === 0) {
       return res.status(400).json({ error: 'No hay emails registrados' });
     }
 
-    console.log(`📧 Iniciando envío masivo a ${emailsDB.length} suscriptores`);
+    console.log(`📧 Iniciando envío masivo a ${totalEmails} suscriptores`);
 
-    // Preparar attachments
     const attachments = images.map((file, index) => ({
       path: file.path,
       filename: file.originalname,
       cid: `image${index}`
     }));
 
-    // HTML con imágenes embebidas (funciona con Gmail)
     let imagesHTML = '';
     if (emailProvider === 'Gmail') {
       images.forEach((file, index) => {
@@ -455,8 +617,9 @@ app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), asyn
     let successCount = 0;
     let failedEmails = [];
 
-    // Enviar a cada suscriptor
-    for (const record of emailsDB) {
+    const allEmails = await getAllEmails();
+
+    for (const record of allEmails) {
       try {
         if (attachments.length > 0) {
           await sendEmailWithAttachments({
@@ -473,8 +636,6 @@ app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), asyn
           });
         }
         successCount++;
-        
-        // Pequeño delay para no sobrecargar
         await new Promise(resolve => setTimeout(resolve, 100));
         
       } catch (error) {
@@ -484,15 +645,12 @@ app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), asyn
     }
 
     console.log(`\n📊 Resultado del envío masivo:`);
-    console.log(`   Exitosos: ${successCount}/${emailsDB.length}`);
+    console.log(`   Exitosos: ${successCount}/${totalEmails}`);
     console.log(`   Fallidos: ${failedEmails.length}`);
-    if (failedEmails.length > 0) {
-      console.log(`   Emails fallidos:`, failedEmails);
-    }
 
     res.json({
       success: true,
-      message: `Email enviado a ${successCount} de ${emailsDB.length} suscriptores`,
+      message: `Email enviado a ${successCount} de ${totalEmails} suscriptores`,
       count: successCount,
       failed: failedEmails.length,
       failedEmails: failedEmails
@@ -507,21 +665,34 @@ app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), asyn
   }
 });
 
-app.get('/api/admin/emails', adminAuth, (req, res) => {
-  res.json({ emails: emailsDB });
+app.get('/api/admin/emails', adminAuth, async (req, res) => {
+  try {
+    const emails = await getAllEmails();
+    res.json({ emails });
+  } catch (error) {
+    console.error('❌ Error obteniendo emails:', error);
+    res.status(500).json({ error: 'Error obteniendo emails' });
+  }
 });
 
 app.delete('/api/admin/emails/:email', adminAuth, async (req, res) => {
-  const { email } = req.params;
-  const index = emailsDB.findIndex(e => e.email === email);
-
-  if (index !== -1) {
-    emailsDB.splice(index, 1);
-    statsDB.totalEmails--;
-    await saveData();
-    res.json({ success: true, message: 'Email eliminado' });
-  } else {
-    res.status(404).json({ error: 'Email no encontrado' });
+  try {
+    const { email: emailAddress } = req.params;
+    
+    const deleted = await deleteEmail(emailAddress);
+    
+    if (deleted) {
+      const stats = await getStats();
+      stats.totalEmails = Math.max(0, stats.totalEmails - 1);
+      await saveStats(stats);
+      
+      res.json({ success: true, message: 'Email eliminado' });
+    } else {
+      res.status(404).json({ error: 'Email no encontrado' });
+    }
+  } catch (error) {
+    console.error('❌ Error eliminando email:', error);
+    res.status(500).json({ error: 'Error eliminando email' });
   }
 });
 
@@ -534,7 +705,7 @@ app.post('/api/test-email', adminAuth, async (req, res) => {
     
     const result = await sendEmail({
       to: testEmail,
-      subject: 'Email de Prueba - Newsletter Demo',
+      subject: 'Email de Prueba - NOTI Demo',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
           <h2 style="color: #d4a574;">✅ Email de Prueba</h2>
@@ -542,6 +713,7 @@ app.post('/api/test-email', adminAuth, async (req, res) => {
           <p><strong>Fecha:</strong> ${new Date().toLocaleString('es-ES')}</p>
           <p><strong>Servicio:</strong> ${emailProvider}</p>
           <p><strong>Modo:</strong> ${CONFIG.NODE_ENV}</p>
+          <p><strong>Base de datos:</strong> ${useMongoDB ? 'MongoDB (persistente)' : 'Archivos JSON (local)'}</p>
         </div>
       `
     });
@@ -563,19 +735,32 @@ app.post('/api/test-email', adminAuth, async (req, res) => {
 });
 
 // Ruta de health check
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
+  const dbStatus = useMongoDB ? 
+    (mongoose.connection.readyState === 1 ? 'connected' : 'disconnected') : 
+    'file-based';
+  
+  const emailCount = await countEmails();
+  
   res.json({
     status: 'ok',
     emailProvider: emailProvider,
     emailConfigured: !!emailService,
+    database: useMongoDB ? 'MongoDB' : 'JSON Files',
+    databaseStatus: dbStatus,
     mode: CONFIG.NODE_ENV,
-    emailsCount: emailsDB.length,
+    emailsCount: emailCount,
     timestamp: new Date().toISOString()
   });
 });
 
 // Iniciar servidor
-loadData().then(() => {
+const startServer = async () => {
+  // Cargar datos desde JSON si estamos en modo local
+  if (!useMongoDB) {
+    await loadDataFromJSON();
+  }
+  
   app.listen(CONFIG.PORT, () => {
     console.log('\n╔════════════════════════════════════════╗');
     console.log('║   🚀 SERVIDOR NEWSLETTER INICIADO     ║');
@@ -583,9 +768,10 @@ loadData().then(() => {
     console.log(`\n📍 Backend:  http://localhost:${CONFIG.PORT}/`);
     console.log(`🌐 Frontend: ${CONFIG.FRONTEND_URL}`);
     console.log(`📧 Provider: ${emailProvider}`);
+    console.log(`🗄️  Database: ${useMongoDB ? 'MongoDB (persistente)' : 'Archivos JSON (local)'}`);
     console.log(`🔧 Modo:     ${CONFIG.NODE_ENV}`);
-    console.log(`👤 Admin:    ${CONFIG.ADMIN_EMAIL}`);
-    console.log(`📊 Emails:   ${emailsDB.length} registrados`);
-    console.log(`✅ Clicks:   ${statsDB.totalClicks}\n`);
+    console.log(`👤 Admin:    ${CONFIG.ADMIN_EMAIL}\n`);
   });
-});
+};
+
+startServer();
