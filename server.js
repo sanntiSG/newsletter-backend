@@ -37,7 +37,7 @@ const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5556',
   'http://localhost:3000',
-  'https://shopdemosg.netlify.app'
+  'https://eternumdemo.netlify.app'
 ];
 
 app.use(cors({
