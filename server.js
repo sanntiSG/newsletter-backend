@@ -1,3 +1,5 @@
+const os = require('os');
+
 require('dotenv').config({ path: process.env.NODE_ENV === 'development' ? '.env.local' : '.env' });
 
 // ============= CONFIGURACIÓN - EDITAR AQUÍ =============
@@ -7,16 +9,16 @@ const CONFIG = {
   NODE_ENV: process.env.NODE_ENV || 'production',
   USE_GMAIL: process.env.USE_GMAIL === 'true',
   MONGODB_URI: process.env.MONGODB_URI,
-  
+
   // Resend (producción)
   RESEND_API_KEY: process.env.RESEND_API_KEY,
   EMAIL_FROM: process.env.EMAIL_FROM || 'onboarding@resend.dev',
   EMAIL_FROM_NAME: process.env.EMAIL_FROM_NAME || 'NOTI Demo',
-  
+
   // Gmail (desarrollo local)
   EMAIL_USER: process.env.EMAIL_USER,
   EMAIL_PASSWORD: process.env.EMAIL_PASSWORD,
-  
+
   // Admin
   ADMIN_EMAIL: process.env.ADMIN_EMAIL,
   ADMIN_PASSWORD: process.env.ADMIN_PASSWORD,
@@ -35,14 +37,18 @@ const app = express();
 const allowedOrigins = [
   CONFIG.FRONTEND_URL,
   'http://localhost:5173',
-  'http://localhost:5556',
+  'http://localhost:5555',
   'http://localhost:3000',
   'https://eternumdemo.netlify.app'
 ];
 
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
+    // Permitir si no hay origin (como Postman), si está en allowedOrigins, 
+    // o si es una IP de red local (192.168.x.x o 10.x.x.x) en desarrollo
+    const isLocalNetwork = origin && (origin.startsWith('http://192.168.') || origin.startsWith('http://10.'));
+
+    if (!origin || allowedOrigins.includes(origin) || (CONFIG.NODE_ENV === 'development' && isLocalNetwork)) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS: ' + origin));
@@ -61,7 +67,7 @@ let mongoose, Email, Stats;
 if (CONFIG.MONGODB_URI) {
   // Usar MongoDB (producción)
   mongoose = require('mongoose');
-  
+
   mongoose.connect(CONFIG.MONGODB_URI)
     .then(() => {
       console.log('✅ MongoDB conectado correctamente');
@@ -110,7 +116,7 @@ let statsDB = {
 // Cargar datos desde JSON (solo en modo local)
 const loadDataFromJSON = async () => {
   if (useMongoDB) return;
-  
+
   try {
     const emailsData = await fs.readFile('data/emails.json', 'utf8');
     const statsData = await fs.readFile('data/stats.json', 'utf8');
@@ -125,7 +131,7 @@ const loadDataFromJSON = async () => {
 // Guardar datos en JSON (solo en modo local)
 const saveDataToJSON = async () => {
   if (useMongoDB) return;
-  
+
   try {
     await fs.mkdir('data', { recursive: true });
     await fs.writeFile('data/emails.json', JSON.stringify(emailsDB, null, 2));
@@ -261,7 +267,7 @@ let emailProvider = 'unknown';
 
 if (CONFIG.USE_GMAIL && CONFIG.EMAIL_USER && CONFIG.EMAIL_PASSWORD) {
   const nodemailer = require('nodemailer');
-  
+
   emailService = nodemailer.createTransport({
     service: 'gmail',
     auth: {
@@ -270,20 +276,20 @@ if (CONFIG.USE_GMAIL && CONFIG.EMAIL_USER && CONFIG.EMAIL_PASSWORD) {
     },
     tls: { rejectUnauthorized: false }
   });
-  
+
   emailProvider = 'Gmail';
   console.log('📧 Modo DESARROLLO: Usando Gmail/Nodemailer');
   console.log('   Email:', CONFIG.EMAIL_USER);
-  
+
   emailService.verify()
     .then(() => console.log('✅ Gmail configurado correctamente'))
     .catch((err) => console.error('❌ Error en Gmail:', err.message));
-    
+
 } else if (CONFIG.RESEND_API_KEY) {
   const { Resend } = require('resend');
   emailService = new Resend(CONFIG.RESEND_API_KEY);
   emailProvider = 'Resend';
-  
+
   console.log('🚀 Modo PRODUCCIÓN: Usando Resend');
   console.log('   From Email:', CONFIG.EMAIL_FROM);
   console.log('   From Name:', CONFIG.EMAIL_FROM_NAME);
@@ -305,10 +311,10 @@ const sendEmail = async ({ to, subject, html }) => {
         subject: subject,
         html: html,
       });
-      
+
       console.log(`✅ [Gmail] Email enviado a: ${to}`);
       return { success: true, id: info.messageId };
-      
+
     } else if (emailProvider === 'Resend') {
       const { data, error } = await emailService.emails.send({
         from: `${CONFIG.EMAIL_FROM_NAME} <${CONFIG.EMAIL_FROM}>`,
@@ -354,10 +360,10 @@ const sendEmailWithAttachments = async ({ to, subject, html, attachments }) => {
         html: html,
         attachments: nodemailerAttachments
       });
-      
+
       console.log(`✅ [Gmail] Email con attachments enviado a: ${to}`);
       return { success: true, id: info.messageId };
-      
+
     } else if (emailProvider === 'Resend') {
       const resendAttachments = await Promise.all(
         attachments.map(async (file) => {
@@ -444,7 +450,7 @@ app.post('/api/subscribe', async (req, res) => {
       stats.emailsByDay[today] = (stats.emailsByDay[today] || 0) + 1;
       stats.totalEmails++;
     }
-    
+
     await createEmail(emailAddress);
     await saveStats(stats);
 
@@ -505,13 +511,13 @@ app.post('/api/verify-email', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error enviando verificación:', error);
-    
+
     let errorMessage = 'Error al enviar email de verificación';
     if (error.message && error.message.includes('not configured')) {
       errorMessage = 'Servicio de email no configurado. Contacta al administrador.';
     }
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       error: errorMessage,
       details: CONFIG.NODE_ENV === 'development' ? error.message : undefined
     });
@@ -537,7 +543,7 @@ app.get('/api/admin/stats', adminAuth, async (req, res) => {
   try {
     const stats = await getStats();
     const emails = await getAllEmails();
-    
+
     // Convertir datos para el chart
     let chartData;
     if (useMongoDB) {
@@ -637,7 +643,7 @@ app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), asyn
         }
         successCount++;
         await new Promise(resolve => setTimeout(resolve, 100));
-        
+
       } catch (error) {
         failedEmails.push(record.email);
         console.error(`❌ Error enviando a ${record.email}:`, error.message);
@@ -658,7 +664,7 @@ app.post('/api/admin/send-broadcast', adminAuth, upload.array('images', 5), asyn
 
   } catch (error) {
     console.error('❌ Error en broadcast:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Error al enviar emails masivos',
       details: CONFIG.NODE_ENV === 'development' ? error.message : undefined
     });
@@ -678,14 +684,14 @@ app.get('/api/admin/emails', adminAuth, async (req, res) => {
 app.delete('/api/admin/emails/:email', adminAuth, async (req, res) => {
   try {
     const { email: emailAddress } = req.params;
-    
+
     const deleted = await deleteEmail(emailAddress);
-    
+
     if (deleted) {
       const stats = await getStats();
       stats.totalEmails = Math.max(0, stats.totalEmails - 1);
       await saveStats(stats);
-      
+
       res.json({ success: true, message: 'Email eliminado' });
     } else {
       res.status(404).json({ error: 'Email no encontrado' });
@@ -700,9 +706,9 @@ app.delete('/api/admin/emails/:email', adminAuth, async (req, res) => {
 app.post('/api/test-email', adminAuth, async (req, res) => {
   try {
     const testEmail = req.body.email || (emailProvider === 'Gmail' ? CONFIG.EMAIL_USER : 'delivered@resend.dev');
-    
+
     console.log(`🧪 Enviando email de prueba a: ${testEmail}`);
-    
+
     const result = await sendEmail({
       to: testEmail,
       subject: 'Email de Prueba - NOTI Demo',
@@ -736,12 +742,12 @@ app.post('/api/test-email', adminAuth, async (req, res) => {
 
 // Ruta de health check
 app.get('/health', async (req, res) => {
-  const dbStatus = useMongoDB ? 
-    (mongoose.connection.readyState === 1 ? 'connected' : 'disconnected') : 
+  const dbStatus = useMongoDB ?
+    (mongoose.connection.readyState === 1 ? 'connected' : 'disconnected') :
     'file-based';
-  
+
   const emailCount = await countEmails();
-  
+
   res.json({
     status: 'ok',
     emailProvider: emailProvider,
@@ -760,13 +766,27 @@ const startServer = async () => {
   if (!useMongoDB) {
     await loadDataFromJSON();
   }
-  
-  app.listen(CONFIG.PORT, () => {
+
+  // Forzamos el host '0.0.0.0' para que escuche en toda la red local
+  app.listen(CONFIG.PORT, '0.0.0.0', () => {
     console.log('\n╔════════════════════════════════════════╗');
     console.log('║   🚀 SERVIDOR NEWSLETTER INICIADO     ║');
     console.log('╚════════════════════════════════════════╝');
-    console.log(`\n📍 Backend:  http://localhost:${CONFIG.PORT}/`);
-    console.log(`🌐 Frontend: ${CONFIG.FRONTEND_URL}`);
+
+    console.log(`\n📍 Local:   http://localhost:${CONFIG.PORT}/`);
+
+    // Detectar y mostrar IPs de la red local
+    const nets = os.networkInterfaces();
+    for (const name of Object.keys(nets)) {
+      for (const net of nets[name]) {
+        // Saltamos las direcciones IPv6 y las internas (127.0.0.1)
+        if (net.family === 'IPv4' && !net.internal) {
+          console.log(`➜  Network: http://${net.address}:${CONFIG.PORT}/`);
+        }
+      }
+    }
+
+    console.log(`\n🌐 Frontend: ${CONFIG.FRONTEND_URL}`);
     console.log(`📧 Provider: ${emailProvider}`);
     console.log(`🗄️  Database: ${useMongoDB ? 'MongoDB (persistente)' : 'Archivos JSON (local)'}`);
     console.log(`🔧 Modo:     ${CONFIG.NODE_ENV}`);
